@@ -5,14 +5,21 @@ Unicode true
 !include "LogicLib.nsh"
 
 !define APP      "MdView"
-!define VERSION  "1.1.0"
+!ifndef VERSION
+  !define VERSION "0.0.0"   ; build.sh passes -DVERSION=x.y.z
+!endif
 !define PUBLISHER "Davy Heutmekers"
 !define PROGID   "MdView.Markdown"
 !define UNINST   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
-!define BUILD    "../dist"
+!ifndef BUILD
+  !define BUILD "../dist"
+!endif
 
 Name "${APP}"
-OutFile "MdView-Setup-${VERSION}.exe"
+!ifndef OUTDIR
+  !define OUTDIR "."
+!endif
+OutFile "${OUTDIR}/MdView-Setup-${VERSION}.exe"
 InstallDir "$PROGRAMFILES64\${APP}"
 InstallDirRegKey HKLM "${UNINST}" "InstallLocation"
 RequestExecutionLevel admin

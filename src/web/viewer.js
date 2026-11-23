@@ -91,9 +91,7 @@
       content.style.scrollBehavior = 'auto';
       content.scrollTop = prevScroll;
       content.style.scrollBehavior = '';
-      const f = $('#reload-flash');
-      f.classList.add('show');
-      setTimeout(() => f.classList.remove('show'), 900);
+      flash('Updated', 900);
     } else {
       content.scrollTop = 0;
       if (doc.fragment) scrollToId(doc.fragment, false);
@@ -341,9 +339,59 @@
     if (e.button === 3) { e.preventDefault(); send({ type: 'back' }); }
   });
 
+  /* ---------------- updates ---------------- */
+  let flashTimer = 0;
+  function flash(text, ms, long) {
+    const f = $('#reload-flash');
+    f.textContent = text;
+    f.classList.toggle('long', !!long);
+    f.classList.add('show');
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => f.classList.remove('show'), ms);
+  }
+
+  const updBtn = $('#btn-update');
+  let updState = '';
+  function onUpdate(msg) {
+    if (!['checking', 'uptodate', 'checkfailed'].includes(msg.state)) {
+      updState = msg.state;
+      updBtn.classList.remove('busy', 'error');
+    }
+    switch (msg.state) {
+      case 'checking': flash('Checking for updates…', 4000, true); break;
+      case 'uptodate': flash(msg.message, 3500, true); break;
+      case 'checkfailed': flash(msg.message, 5000, true); break;
+      case 'available':
+        updBtn.hidden = false;
+        updBtn.textContent = 'Update to ' + msg.version;
+        updBtn.title = 'MdView ' + msg.version + ' is available. Click to download and install.';
+        break;
+      case 'downloading':
+        updBtn.hidden = false; updBtn.classList.add('busy');
+        updBtn.textContent = 'Downloading ' + (msg.percent || 0) + '%';
+        break;
+      case 'installing':
+        updBtn.hidden = false; updBtn.classList.add('busy');
+        updBtn.textContent = 'Installing…';
+        break;
+      case 'error':
+        updBtn.hidden = false; updBtn.classList.add('error');
+        updBtn.textContent = 'Update failed — retry';
+        updBtn.title = msg.message || '';
+        updState = 'available';
+        break;
+    }
+  }
+  updBtn.addEventListener('click', () => {
+    if (updState === 'available') send({ type: 'installUpdate' });
+  });
+  $('#btn-about').addEventListener('click', () => send({ type: 'checkUpdate' }));
+
   /* ---------------- host bridge ---------------- */
   function onHostMessage(msg) {
     if (msg.type === 'doc') render(msg, !!msg.reload);
+    else if (msg.type === 'update') onUpdate(msg);
+    else if (msg.type === 'version') $('#btn-about').title = 'MdView ' + msg.version + ' — click to check for updates';
     else if (msg.type === 'error') {
       content.innerHTML = '<div class="empty"><h1>Can\'t open file</h1><p class="error"></p></div>';
       content.querySelector('.error').textContent = msg.message;
@@ -351,6 +399,7 @@
   }
 
   window.MdView = {
+    _host: onHostMessage,
     load(name, text, baseUrl, reload) { render({ name, text, baseUrl: baseUrl || '' }, !!reload); }
   };
 

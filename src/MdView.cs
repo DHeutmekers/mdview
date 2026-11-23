@@ -6,7 +6,10 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -17,9 +20,8 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: System.Reflection.AssemblyProduct("MdView")]
 [assembly: System.Reflection.AssemblyDescription("Lightweight Markdown viewer")]
 [assembly: System.Reflection.AssemblyCompany("Davy Heutmekers")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.1.0")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
+[assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
+// Version attributes live in BuildInfo.cs, which build.sh generates from the release tag.
 
 namespace MdView
 {
@@ -56,6 +58,7 @@ namespace MdView
             AppDomain.CurrentDomain.UnhandledException += (s, e) => Fail("Unhandled exception", e.ExceptionObject);
             Application.ThreadException += (s, e) => Fail("UI thread exception", e.Exception);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 /* TLS 1.2 */; } catch { }
             TaskScheduler.UnobservedTaskException += (s, e) => { Log("Unobserved task exception: " + e.Exception); e.SetObserved(); };
             try { Run(args); }
             catch (Exception ex) { Fail("Startup failed", ex); }
@@ -93,6 +96,9 @@ namespace MdView
         string pendingFragment;
         bool pageReady;
         int readRetries;
+        bool autoCheckDone;
+        bool updateBusy;
+        Updater.Release updateInfo;
 
         public ViewerForm(string path)
         {
@@ -177,7 +183,16 @@ namespace MdView
                     Program.Log("page ready, file=" + currentPath);
                     pageReady = true;
                     if (currentPath != null) LoadFile(currentPath, pendingFragment, false);
+                    Post(new Dictionary<string, object> { { "type", "version" }, { "version", Updater.CurrentString } });
+                    if (!autoCheckDone)
+                    {
+                        autoCheckDone = true;
+                        if (Updater.AutoCheckEnabled && Updater.DueForCheck()) CheckForUpdate(false);
+                    }
+                    else if (updateInfo != null) PostUpdate("available");
                     break;
+                case "checkUpdate": CheckForUpdate(true); break;
+                case "installUpdate": InstallUpdate(); break;
                 case "reload": SendDoc(true); break;
                 case "openDialog": ShowOpenDialog(); break;
                 case "external": Shell(Str(msg, "url")); break;
@@ -365,6 +380,69 @@ namespace MdView
         }
 
         // ---------------- misc ----------------
+        // ---------------- updates ----------------
+        void PostUpdate(string state, string message = null, int percent = -1)
+        {
+            var d = new Dictionary<string, object> { { "type", "update" }, { "state", state } };
+            if (updateInfo != null) { d["version"] = updateInfo.VersionString; d["url"] = updateInfo.PageUrl; }
+            if (message != null) d["message"] = message;
+            if (percent >= 0) d["percent"] = percent;
+            Post(d);
+        }
+
+        async void CheckForUpdate(bool manual)
+        {
+            if (updateBusy) return;
+            updateBusy = true;
+            if (manual) PostUpdate("checking");
+            try
+            {
+                var rel = await Updater.GetLatestAsync();
+                Updater.MarkChecked();
+                if (rel != null && rel.Version > Updater.Current)
+                {
+                    updateInfo = rel;
+                    Program.Log("update available: " + rel.VersionString);
+                    PostUpdate("available");
+                }
+                else if (manual) PostUpdate("uptodate", "You're on the latest version (" + Updater.CurrentString + ")");
+            }
+            catch (Exception ex)
+            {
+                Program.Log("update check failed: " + ex.Message);
+                if (manual) PostUpdate("checkfailed", "Couldn't check for updates: " + ex.Message);
+            }
+            finally { updateBusy = false; }
+        }
+
+        async void InstallUpdate()
+        {
+            if (updateInfo == null || updateBusy) return;
+            var installDir = Updater.InstalledDir();
+            if (installDir == null)
+            {
+                // Portable copy (not installed via the setup): just open the release page.
+                Shell(updateInfo.PageUrl);
+                return;
+            }
+            updateBusy = true;
+            try
+            {
+                PostUpdate("downloading", null, 0);
+                var setup = await Updater.DownloadAsync(updateInfo, p => PostUpdate("downloading", null, p));
+                PostUpdate("installing");
+                Program.Log("running installer " + setup);
+                Updater.RunInstallerAndRelaunch(setup, Path.Combine(installDir, "MdView.exe"), currentPath);
+                Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                Program.Log("update failed: " + ex);
+                PostUpdate("error", "Update failed: " + ex.Message);
+            }
+            finally { updateBusy = false; }
+        }
+
         static void Shell(string target)
         {
             if (string.IsNullOrEmpty(target)) return;
@@ -427,6 +505,190 @@ namespace MdView
                     r.X, r.Y, r.Width, r.Height, WindowState == FormWindowState.Maximized ? "1" : "0"));
             }
             catch { }
+        }
+    }
+
+    /// <summary>Checks GitHub Releases for a newer version and installs it.</summary>
+    static class Updater
+    {
+        public const string Repo = "DHeutmekers/mdview";
+
+        public class Release
+        {
+            public Version Version;
+            public string VersionString;
+            public string Tag;
+            public string PageUrl;
+            public string SetupName { get { return "MdView-Setup-" + VersionString + ".exe"; } }
+            public string DownloadBase { get { return "https://github.com/" + Repo + "/releases/download/" + Tag + "/"; } }
+        }
+
+        static string DataDir
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MdView"); }
+        }
+
+        public static Version Current { get { return Norm(typeof(Updater).Assembly.GetName().Version); } }
+        public static string CurrentString { get { var v = Current; return v.Major + "." + v.Minor + "." + v.Build; } }
+
+        static Version Norm(Version v)
+        {
+            return new Version(v.Major, v.Minor, Math.Max(v.Build, 0), Math.Max(v.Revision, 0));
+        }
+
+        public static bool AutoCheckEnabled
+        {
+            // Dev builds (0.0.0) and MDVIEW_NOUPDATE=1 never check automatically.
+            get { return Current > new Version(0, 0, 0, 0) && Environment.GetEnvironmentVariable("MDVIEW_NOUPDATE") != "1"; }
+        }
+
+        static string StampFile { get { return Path.Combine(DataDir, "last-update-check.txt"); } }
+
+        public static bool DueForCheck()
+        {
+            try
+            {
+                var t = DateTime.Parse(File.ReadAllText(StampFile).Trim(), System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind);
+                return (DateTime.UtcNow - t.ToUniversalTime()).TotalHours >= 20;
+            }
+            catch { return true; }
+        }
+
+        public static void MarkChecked()
+        {
+            try { Directory.CreateDirectory(DataDir); File.WriteAllText(StampFile, DateTime.UtcNow.ToString("o")); } catch { }
+        }
+
+        static HttpWebRequest Request(string url)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "MdView/" + CurrentString;
+            req.Timeout = 15000;
+            req.ReadWriteTimeout = 30000;
+            return req;
+        }
+
+        /// <summary>
+        /// Uses the github.com/{repo}/releases/latest redirect instead of the REST API,
+        /// so there is no API rate limit and no token is needed.
+        /// </summary>
+        public static async Task<Release> GetLatestAsync()
+        {
+            var req = Request("https://github.com/" + Repo + "/releases/latest");
+            req.Method = "HEAD";
+            req.AllowAutoRedirect = false;
+            using (var resp = (HttpWebResponse)await req.GetResponseAsync())
+            {
+                var loc = resp.Headers["Location"];
+                if (string.IsNullOrEmpty(loc) || loc.IndexOf("/releases/tag/", StringComparison.Ordinal) < 0) return null;
+                var tag = Uri.UnescapeDataString(loc.Substring(loc.LastIndexOf('/') + 1));
+                Version v;
+                if (!Version.TryParse(tag.TrimStart('v', 'V'), out v)) return null;
+                v = Norm(v);
+                return new Release
+                {
+                    Version = v,
+                    VersionString = v.Major + "." + v.Minor + "." + v.Build,
+                    Tag = tag,
+                    PageUrl = "https://github.com/" + Repo + "/releases/tag/" + Uri.EscapeDataString(tag)
+                };
+            }
+        }
+
+        static async Task<string> GetStringAsync(string url)
+        {
+            using (var resp = await Request(url).GetResponseAsync())
+            using (var sr = new StreamReader(resp.GetResponseStream()))
+                return await sr.ReadToEndAsync();
+        }
+
+        /// <summary>Downloads the installer to %TEMP% and checks it against the release's SHA256SUMS.txt.</summary>
+        public static async Task<string> DownloadAsync(Release rel, Action<int> progress)
+        {
+            var sums = await GetStringAsync(rel.DownloadBase + "SHA256SUMS.txt");
+            string expected = null;
+            foreach (var raw in sums.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.EndsWith(rel.SetupName, StringComparison.OrdinalIgnoreCase))
+                    expected = line.Split(new[] { ' ', '\t', '*' }, StringSplitOptions.RemoveEmptyEntries)[0].ToLowerInvariant();
+            }
+            if (expected == null) throw new Exception(rel.SetupName + " is not listed in SHA256SUMS.txt");
+
+            var target = Path.Combine(Path.GetTempPath(), rel.SetupName);
+            using (var resp = await Request(rel.DownloadBase + rel.SetupName).GetResponseAsync())
+            using (var input = resp.GetResponseStream())
+            using (var output = new FileStream(target, FileMode.Create, FileAccess.Write))
+            {
+                long total = resp.ContentLength, done = 0;
+                var buf = new byte[81920];
+                int n, last = -1;
+                while ((n = await input.ReadAsync(buf, 0, buf.Length)) > 0)
+                {
+                    await output.WriteAsync(buf, 0, n);
+                    done += n;
+                    if (total > 0)
+                    {
+                        int pct = (int)(done * 100 / total);
+                        if (pct != last) { last = pct; progress(pct); }
+                    }
+                }
+            }
+
+            string actual;
+            using (var sha = SHA256.Create())
+            using (var fs = File.OpenRead(target))
+                actual = BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+            if (actual != expected)
+            {
+                try { File.Delete(target); } catch { }
+                throw new Exception("Checksum mismatch for the downloaded installer");
+            }
+            return target;
+        }
+
+        /// <summary>Folder MdView was installed to by the setup, or null for a portable copy.</summary>
+        public static string InstalledDir()
+        {
+            try
+            {
+                using (var hklm = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64))
+                using (var k = hklm.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\MdView"))
+                {
+                    var loc = k == null ? null : k.GetValue("InstallLocation") as string;
+                    if (string.IsNullOrEmpty(loc)) return null;
+                    var a = Path.GetFullPath(loc).TrimEnd('\\');
+                    var b = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd('\\');
+                    return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) ? a : null;
+                }
+            }
+            catch { return null; }
+        }
+
+        static string Ps(string s) { return "'" + s.Replace("'", "''") + "'"; }
+
+        /// <summary>
+        /// Starts a hidden, non-elevated PowerShell that runs the installer elevated (UAC prompt),
+        /// waits for it, then starts MdView again as the normal user, with the same file.
+        /// If the UAC prompt is cancelled, the existing version is simply started again.
+        /// </summary>
+        public static void RunInstallerAndRelaunch(string setup, string exe, string file)
+        {
+            var relaunch = "Start-Process -FilePath " + Ps(exe) +
+                (string.IsNullOrEmpty(file) ? "" : " -ArgumentList " + Ps("\"" + file + "\""));
+            var script =
+                "try { Start-Process -FilePath " + Ps(setup) + " -ArgumentList '/S' -Verb RunAs -Wait -ErrorAction Stop } catch { }\n" +
+                "Start-Sleep -Milliseconds 500\n" +
+                relaunch + "\n" +
+                "Remove-Item -LiteralPath " + Ps(setup) + " -ErrorAction SilentlyContinue\n";
+            var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            Process.Start(new ProcessStartInfo("powershell.exe",
+                "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand " + encoded)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
         }
     }
 }

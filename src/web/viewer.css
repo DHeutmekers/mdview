@@ -107,6 +107,16 @@ body {
   opacity: 0; transition: opacity .4s;
 }
 #reload-flash.show { opacity: 1; transition: none; }
+#reload-flash.long { color: var(--fg-muted); }
+#toolbar button.pill {
+  width: auto; height: 26px; padding: 0 12px; margin-right: 6px;
+  border-radius: 13px; font: 600 12px var(--font);
+  background: var(--accent); color: #fff;
+}
+#toolbar button.pill:hover { background: var(--accent); color: #fff; filter: brightness(1.1); }
+#toolbar button.pill.busy { background: var(--bg-hover); color: var(--fg-muted); cursor: default; filter: none; }
+#toolbar button.pill.error { background: transparent; color: #d1242f; border: 1px solid currentColor; }
+#toolbar button[hidden] { display: none; }
 
 #content {
   flex: 1; overflow-y: auto; position: relative;
@@ -206,7 +216,7 @@ body {
 /* ---------- print ---------- */
 @media print {
   body { display: block; overflow: visible; }
-  #sidebar, #toolbar, .copy, .lang, .anchor { display: none !important; }
+  #sidebar, #toolbar, #btn-update, .copy, .lang, .anchor { display: none !important; }
   #main { display: block; }
   #content { overflow: visible; padding: 0; }
   .markdown-body pre { white-space: pre-wrap; break-inside: avoid; }
