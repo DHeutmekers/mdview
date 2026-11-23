@@ -387,10 +387,23 @@
   });
   $('#btn-about').addEventListener('click', () => send({ type: 'checkUpdate' }));
 
+  /* ---------------- default app prompt (shown once) ---------------- */
+  const defaultBar = $('#default-bar');
+  function showDefaultPrompt() {
+    defaultBar.hidden = false;
+    send({ type: 'defaultPromptSeen' });
+  }
+  $('#btn-make-default').addEventListener('click', () => {
+    defaultBar.hidden = true;
+    send({ type: 'makeDefault' });
+  });
+  $('#btn-default-later').addEventListener('click', () => { defaultBar.hidden = true; });
+
   /* ---------------- host bridge ---------------- */
   function onHostMessage(msg) {
     if (msg.type === 'doc') render(msg, !!msg.reload);
     else if (msg.type === 'update') onUpdate(msg);
+    else if (msg.type === 'defaultPrompt') showDefaultPrompt();
     else if (msg.type === 'version') $('#btn-about').title = 'MdView ' + msg.version + ' — click to check for updates';
     else if (msg.type === 'error') {
       content.innerHTML = '<div class="empty"><h1>Can\'t open file</h1><p class="error"></p></div>';

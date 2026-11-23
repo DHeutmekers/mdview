@@ -1,11 +1,15 @@
 name: Release
 
-# Publishing a GitHub release with a tag like v1.2.0 builds MdView and attaches:
+# Two ways to release, both build MdView and attach:
 #   MdView-Setup-1.2.0.exe, MdView-1.2.0-portable.zip, SHA256SUMS.txt
+# - publish a GitHub release with a tag like v1.2.0, or
+# - push a tag like v1.2.0; the workflow then creates the release itself.
 # The in-app updater looks for exactly these file names.
 on:
   release:
     types: [published]
+  push:
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       version:
@@ -15,6 +19,10 @@ on:
 
 permissions:
   contents: write
+
+# Publishing a release in the UI can also fire the tag push; run one build per tag at a time.
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
   build:
@@ -30,10 +38,10 @@ jobs:
       - name: Determine version
         id: v
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
           INPUT: ${{ inputs.version }}
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then V="${TAG#v}"; V="${V#V}"; else V="$INPUT"; fi
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then V="${TAG#v}"; V="${V#V}"; else V="$INPUT"; fi
           if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must look like v1.2.3 (got '$TAG')"; exit 1
           fi
@@ -43,11 +51,25 @@ jobs:
         run: VERSION="${{ steps.v.outputs.version }}" ./build.sh
 
       - name: Attach to release
-        if: github.event_name == 'release'
+        if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
+          elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Release was published in the UI; its own run attaches the files.
+            echo "Release $TAG already exists, nothing to do."
+          else
+            # Draft first, publish once the files are attached, so the in-app updater
+            # never sees a release without an installer. (A release published with
+            # GITHUB_TOKEN doesn't trigger the release event again.)
+            gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "MdView $VERSION" --generate-notes
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
 
       - name: Keep as workflow artifact
         uses: actions/upload-artifact@v5

@@ -190,7 +190,10 @@ namespace MdView
                         if (Updater.AutoCheckEnabled && Updater.DueForCheck()) CheckForUpdate(false);
                     }
                     else if (updateInfo != null) PostUpdate("available");
+                    if (DefaultApp.ShouldPrompt()) Post(new Dictionary<string, object> { { "type", "defaultPrompt" } });
                     break;
+                case "defaultPromptSeen": DefaultApp.MarkPrompted(); break;
+                case "makeDefault": DefaultApp.MarkPrompted(); DefaultApp.OpenSettings(); break;
                 case "checkUpdate": CheckForUpdate(true); break;
                 case "installUpdate": InstallUpdate(); break;
                 case "reload": SendDoc(true); break;
@@ -505,6 +508,86 @@ namespace MdView
                     r.X, r.Y, r.Width, r.Height, WindowState == FormWindowState.Maximized ? "1" : "0"));
             }
             catch { }
+        }
+    }
+
+    /// <summary>
+    /// One-time offer to make MdView the default app for .md files.
+    /// Windows 10/11 don't let apps set defaults themselves, so this opens the Default apps settings.
+    /// </summary>
+    static class DefaultApp
+    {
+        static string MarkerFile
+        {
+            get
+            {
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "MdView", "default-app-prompted.txt");
+            }
+        }
+
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+        static extern int AssocQueryString(int flags, int str, string assoc, string extra,
+            StringBuilder outBuf, ref uint outLen);
+
+        /// <summary>Path of the program Windows uses to open .md files, or null if none.</summary>
+        static string MdHandler()
+        {
+            const int ASSOCF_NOTRUNCATE = 0x20, ASSOCSTR_EXECUTABLE = 2;
+            uint len = 1024;
+            var sb = new StringBuilder((int)len);
+            return AssocQueryString(ASSOCF_NOTRUNCATE, ASSOCSTR_EXECUTABLE, ".md", "open", sb, ref len) == 0
+                ? sb.ToString() : null;
+        }
+
+        public static bool IsDefault()
+        {
+            try
+            {
+                var h = MdHandler();
+                return h != null && string.Equals(Path.GetFullPath(h), Path.GetFullPath(Application.ExecutablePath),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Only for an installed copy (a portable copy isn't registered as a .md handler),
+        /// only once, and only when MdView isn't already the default.
+        /// MDVIEW_NODEFAULTPROMPT=1 turns it off.
+        /// </summary>
+        public static bool ShouldPrompt()
+        {
+            if (Environment.GetEnvironmentVariable("MDVIEW_NODEFAULTPROMPT") == "1") return false;
+            if (File.Exists(MarkerFile) || Updater.InstalledDir() == null) return false;
+            var isDefault = IsDefault();
+            Program.Log("default .md handler is MdView: " + isDefault);
+            if (isDefault) { MarkPrompted(); return false; }
+            return true;
+        }
+
+        public static void MarkPrompted()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(MarkerFile));
+                File.WriteAllText(MarkerFile, DateTime.UtcNow.ToString("o"));
+            }
+            catch { }
+        }
+
+        public static void OpenSettings()
+        {
+            // Windows 11 opens MdView's own page (its RegisteredApplications name); Windows 10 ignores
+            // the parameter and opens the general Default apps page.
+            try
+            {
+                Process.Start(new ProcessStartInfo("ms-settings:defaultapps?registeredAppMachine=MdView") { UseShellExecute = true });
+            }
+            catch
+            {
+                try { Process.Start(new ProcessStartInfo("ms-settings:defaultapps") { UseShellExecute = true }); } catch { }
+            }
         }
     }
 
