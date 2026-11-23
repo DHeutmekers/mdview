@@ -1,9 +1,11 @@
 name: Release
 
-# Two ways to release, both build MdView and attach:
+# Three ways to release, all build MdView and attach:
 #   MdView-Setup-1.2.0.exe, MdView-1.2.0-portable.zip, SHA256SUMS.txt
-# - publish a GitHub release with a tag like v1.2.0, or
-# - push a tag like v1.2.0; the workflow then creates the release itself.
+# - publish a GitHub release with a tag like v1.2.0,
+# - push a tag like v1.2.0; the workflow then creates the release itself, or
+# - run this workflow manually on main with "publish" ticked; it creates the
+#   tag and the release. Without "publish" it only builds a test artifact.
 # The in-app updater looks for exactly these file names.
 on:
   release:
@@ -13,16 +15,20 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build as a test artifact (x.y.z), nothing is published"
+        description: "Version (x.y.z)"
         required: true
         default: "0.0.1"
+      publish:
+        description: "Publish as release vX.Y.Z (creates the tag on this commit)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 # Publishing a release in the UI can also fire the tag push; run one build per tag at a time.
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  group: release-${{ github.event.release.tag_name || (inputs.version && format('v{0}', inputs.version)) || github.ref_name }}
 
 jobs:
   build:
@@ -51,13 +57,24 @@ jobs:
         run: VERSION="${{ steps.v.outputs.version }}" ./build.sh
 
       - name: Attach to release
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name || github.ref_name }}
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::Publish only from main (this run is on $GITHUB_REF)"; exit 1
+            fi
+            TAG="v$VERSION"
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              echo "::error::Tag $TAG already exists"; exit 1
+            fi
+            gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft \
+              --title "MdView $VERSION" --generate-notes
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          elif [ "$GITHUB_EVENT_NAME" = "release" ]; then
             gh release upload "$TAG" out/* --clobber --repo "$GITHUB_REPOSITORY"
           elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # Release was published in the UI; its own run attaches the files.
